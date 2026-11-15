@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Papaya Fruit Disease Detection System</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+<style>
+:root { --leaf:#1f5c3a; --leaf-d:#134027; --flesh:#e8742a; --bg:#fbf6ec; --card:#fff; --ink:#26302a; --line:#e6dcc8; }
+* { box-sizing:border-box; }
+body { font-family:Georgia,"Times New Roman",serif; background:var(--bg); color:var(--ink); margin:0; padding:20px; line-height:1.5; }
+main { max-width:520px; margin:0 auto; }
+h1 { color:var(--leaf); margin:0 0 4px; font-size:1.7rem; }
+.sub { margin:0 0 18px; color:#5b655e; }
+h3 { margin:22px 0 8px; color:var(--leaf-d); }
+video, #preview { width:100%; max-width:480px; border-radius:12px; background:#222; display:block; }
+#preview { display:none; margin-top:10px; }
+button { background:var(--leaf); color:#fff; border:none; padding:12px 18px; margin:6px 6px 0 0; border-radius:6px; cursor:pointer; font:inherit; }
+button:hover:not(:disabled) { background:var(--leaf-d); }
+button:disabled { background:#9aa79f; cursor:not-allowed; }
+button.alt { background:var(--flesh); }
+button:focus-visible, input:focus-visible { outline:3px solid var(--flesh); outline-offset:2px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; text-align:left; }
+.status { font-size:.95rem; color:#5b655e; margin-bottom:8px; }
+.row { margin:6px 0; }
+.row .top { display:flex; justify-content:space-between; font-size:.95rem; }
+.bar { height:8px; background:#eee4d0; border-radius:4px; overflow:hidden; }
+.bar > i { display:block; height:100%; background:var(--leaf); }
+.row.best .bar > i { background:var(--flesh); }
+.verdict { font-size:1.2rem; font-weight:bold; margin:0 0 8px; }
+.uncertain { color:#b3261e; }
+.info h4 { margin:10px 0 2px; color:var(--leaf-d); }
+.info p, .info ul { margin:2px 0; }
+.info ul { padding-left:20px; }
+.note { font-size:.85rem; color:#6a7269; margin-top:8px; }
+label.thr { display:block; margin-top:6px; }
+table { width:100%; border-collapse:collapse; font-size:.85rem; }
+th, td { border-bottom:1px solid var(--line); padding:5px 4px; text-align:left; }
+.scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Papaya Fruit Disease Detection System</h1>
+  <p class="sub">Image classification using Teachable Machine and TensorFlow.js</p>
+
+  <h3>Camera Preview</h3>
+  <video id="camera" autoplay playsinline muted></video>
+  <button id="startBtn" onclick="startCamera()" disabled>Start Camera</button>
+  <button id="captureBtn" class="alt" onclick="captureAndClassify()" disabled>Capture &amp; Classify</button>
+  <button id="stopBtn" onclick="stopCamera()">Stop Camera</button>
+
+  <h3>Captured / Uploaded Image</h3>
+  <p class="note" style="margin:0 0 6px">Start Camera classifies the live video continuously. Capture &amp; Classify saves the current frame to the history. Or upload a photo:</p>
+  <input type="file" id="imageUpload" accept="image/*" capture="environment" onchange="classifyImage(event)">
+  <img id="preview" alt="Captured or uploaded papaya image">
+
+  <h3>Classification Results</h3>
+  <div class="card">
+    <div class="status" id="status">Loading model...</div>
+    <div id="results">Waiting for image classification...</div>
+    <label class="thr">Confidence threshold: <strong id="thrVal">70</strong>%
+      <input type="range" id="threshold" min="30" max="99" value="70" oninput="document.getElementById('thrVal').textContent=this.value">
+    </label>
+  </div>
+
+  <h3>Disease Information</h3>
+  <div class="card info" id="info">Classify a papaya to see its description, symptoms, and management.</div>
+
+  <h3>Classification History</h3>
+  <div class="card">
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Date</th><th>Time</th><th>Class</th><th>Confidence</th><th>Source</th></tr></thead>
+        <tbody id="historyBody"><tr><td colspan="5">No records yet.</td></tr></tbody>
+      </table>
+    </div>
+    <button onclick="downloadReport()">Download report (CSV)</button>
+    <button class="alt" onclick="clearHistory()">Clear history</button>
+  </div>
+  <p class="note">Confidence is the model's output score, not proof of disease. Confirm with an agricultural technician before taking action.</p>
+</main>
+
+<script>
+const MODEL_URL = "./my-model/";
+const HISTORY_KEY = "papayaHistory";
+
+let model = null, stream = null;
+let history = [];
+// Real-time detection state. loopId lets an old loop stop itself if the
+// camera is stopped and started again quickly (prevents two loops running).
+let detecting = false, loopId = 0;
+const DETECT_INTERVAL_MS = 300;
+
+// Keys are matched by keyword against the class names in metadata.json
+// (Anthracnose, Blackspot, Brown Spot, Phytophthora Blight, Healthy).
+const DISEASE_INFO = {
+  anthracnose: {
+    name: "Anthracnose",
+    desc: "A fungal disease (Colletotrichum) that mostly shows on ripening fruit.",
+    symptoms: ["Sunken, circular brown to black lesions", "Pinkish or orange spore masses in humid weather", "Lesions enlarge and soften the flesh"],
+    manage: ["Remove and dispose of infected fruit", "Harvest carefully and avoid wounding fruit", "Follow local agriculture office advice on fungicide and post-harvest treatment"]
+  },
+  black: {
+    name: "Black Spot",
+    desc: "A fungal disease that causes dark spots on the fruit surface.",
+    symptoms: ["Small dark brown to black spots", "Spots may merge into larger patches", "Fruit looks unsightly and loses market value"],
+    manage: ["Prune to improve air flow", "Remove infected fruit and debris", "Ask the local agriculture office about suitable fungicides"]
+  },
+  brown: {
+    name: "Brown Spot",
+    desc: "A fungal disease that produces brown lesions on the fruit skin.",
+    symptoms: ["Round to irregular brown spots", "Spots may darken and enlarge as the fruit ripens", "Surface blemishes that lower fruit quality"],
+    manage: ["Remove infected fruit and plant debris", "Avoid overhead watering and wet foliage", "Ask the local agriculture office about suitable fungicides"]
+  },
+  phytophthora: {
+    name: "Phytophthora Blight",
+    desc: "A water mold disease that thrives in wet conditions and can rot fruit.",
+    symptoms: ["Water-soaked patches on the fruit", "White, cottony growth on the surface", "Fruit rots and may drop early"],
+    manage: ["Improve drainage and avoid waterlogging", "Remove infected fruit", "Use treatments recommended by local agricultural experts"]
+  },
+  healthy: {
+    name: "Healthy Papaya",
+    desc: "No visible disease symptoms were detected by the model.",
+    symptoms: ["Even skin color", "No spots, lesions, or powdery growth"],
+    manage: ["Keep monitoring the crop", "Maintain good sanitation and proper handling"]
+  }
+};
+
+function findInfo(className) {
+  const n = className.toLowerCase();
+  for (const key of Object.keys(DISEASE_INFO)) {
+    if (n.includes(key)) return DISEASE_INFO[key];
+  }
+  return null;
+}
+
+async function loadModel() {
+  const status = document.getElementById("status");
+  try {
+    model = await tmImage.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
+    console.log("Model successfully loaded!");
+    status.textContent = "Model loaded. Ready for classification.";
+    document.getElementById("startBtn").disabled = false;
+  } catch (error) {
+    console.error(error);
+    status.textContent = "Error loading model. Check the my-model folder and open the page through Live Server.";
+  }
+}
+
+async function startCamera() {
+  if (!model || stream) return;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false
+    });
+    const video = document.getElementById("camera");
+    video.srcObject = stream;
+    await video.play();
+    console.log("Camera started successfully!");
+    document.getElementById("captureBtn").disabled = false;
+    detecting = true;
+    detectLeaf();
+  } catch (error) {
+    stream = null;
+    alert("Unable to access camera: " + error.message);
+  }
+}
+
+function stopCamera() {
+  detecting = false;
+  document.getElementById("captureBtn").disabled = true;
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+  document.getElementById("camera").srcObject = null;
+  console.log("Camera stopped.");
+}
+
+// Real-time classification: predicts on the live video every 300 ms.
+// Live results are shown but not written to the history; use
+// "Capture & Classify" to save a result to the history and report.
+async function detectLeaf() {
+  const video = document.getElementById("camera");
+  const myLoop = ++loopId;
+  while (detecting && stream && myLoop === loopId) {
+    if (video.readyState >= 2) {
+      try {
+        const predictions = await model.predict(video);
+        if (detecting && myLoop === loopId) displayResults(predictions, "Live camera");
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, DETECT_INTERVAL_MS));
+  }
+}
+
+async function captureAndClassify() {
+  const video = document.getElementById("camera");
+  if (!model || !stream || video.readyState < 2 || !video.videoWidth) {
+    alert("Start the camera and wait for the preview before capturing.");
+    return;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  const image = document.getElementById("preview");
+  image.src = canvas.toDataURL("image/jpeg", 0.92);
+  image.style.display = "block";
+
+  try {
+    const predictions = await model.predict(canvas);
+    displayResults(predictions, "Camera capture");
+  } catch (error) {
+    alert("Unable to classify capture: " + error.message);
+  }
+}
+
+async function classifyImage(event) {
+  const file = event.target.files[0];
+  if (!file || !model) return;
+  const image = document.getElementById("preview");
+  const imageURL = URL.createObjectURL(file);
+  try {
+    image.src = imageURL;
+    image.style.display = "block";
+    await image.decode();
+    const predictions = await model.predict(image);
+    displayResults(predictions, "Upload");
+  } catch (error) {
+    alert("Unable to classify image: " + error.message);
+  } finally {
+    URL.revokeObjectURL(imageURL);
+  }
+}
+
+function displayResults(predictions, source) {
+  const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
+  const best = sorted[0];
+  const threshold = Number(document.getElementById("threshold").value) / 100;
+  const uncertain = best.probability < threshold;
+  const results = document.getElementById("results");
+  results.textContent = "";
+
+  const verdict = document.createElement("p");
+  verdict.className = "verdict" + (uncertain ? " uncertain" : "");
+  verdict.textContent = uncertain
+    ? "Uncertain Classification"
+    : best.className + " (" + (best.probability * 100).toFixed(2) + "%)";
+  results.appendChild(verdict);
+
+  sorted.forEach((item, i) => {
+    const pct = (item.probability * 100).toFixed(2);
+    const row = document.createElement("div");
+    row.className = "row" + (i === 0 ? " best" : "");
+    const top = document.createElement("div");
+    top.className = "top";
+    const a = document.createElement("span"); a.textContent = item.className;
+    const b = document.createElement("span"); b.textContent = pct + "%";
+    top.append(a, b);
+    const bar = document.createElement("div"); bar.className = "bar";
+    const fill = document.createElement("i"); fill.style.width = pct + "%";
+    bar.appendChild(fill);
+    row.append(top, bar);
+    results.appendChild(row);
+  });
+
+  showInfo(uncertain ? null : best.className);
+
+  if (!uncertain && source !== "Live camera") {
+    addHistory(best.className, best.probability, source);
+  }
+}
+
+function showInfo(className) {
+  const box = document.getElementById("info");
+  box.textContent = "";
+  if (!className) {
+    box.textContent = "Score is below the threshold. Retake the photo in good lighting with the fruit filling the frame.";
+    return;
+  }
+  const info = findInfo(className);
+  if (!info) { box.textContent = "No information is stored for \"" + className + "\"."; return; }
+  const add = (tag, text) => { const el = document.createElement(tag); el.textContent = text; box.appendChild(el); };
+  const addList = items => { const ul = document.createElement("ul"); items.forEach(t => { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); }); box.appendChild(ul); };
+  add("strong", info.name);
+  add("p", info.desc);
+  add("h4", "Symptoms"); addList(info.symptoms);
+  add("h4", "Management"); addList(info.manage);
+}
+
+function loadHistory() {
+  try { history = JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; } catch (e) { history = []; }
+  renderHistory();
+}
+
+function saveHistory() {
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)); } catch (e) { console.warn("History not saved", e); }
+}
+
+function addHistory(className, probability, source) {
+  const d = new Date();
+  history.unshift({
+    date: d.toLocaleDateString(),
+    time: d.toLocaleTimeString(),
+    className: className,
+    confidence: (probability * 100).toFixed(2),
+    source: source
+  });
+  history = history.slice(0, 200);
+  saveHistory();
+  renderHistory();
+}
+
+function renderHistory() {
+  const body = document.getElementById("historyBody");
+  body.textContent = "";
+  if (!history.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td"); td.colSpan = 5; td.textContent = "No records yet.";
+    tr.appendChild(td); body.appendChild(tr);
+    return;
+  }
+  history.slice(0, 20).forEach(h => {
+    const tr = document.createElement("tr");
+    [h.date, h.time, h.className, h.confidence + "%", h.source].forEach(v => {
+      const td = document.createElement("td"); td.textContent = v; tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+}
+
+function clearHistory() {
+  if (!confirm("Clear all classification history?")) return;
+  history = [];
+  saveHistory();
+  renderHistory();
+}
+
+function downloadReport() {
+  if (!history.length) { alert("No records to export yet."); return; }
+  const esc = v => '"' + String(v).replace(/"/g, '""') + '"';
+  const lines = ["Date,Time,Predicted Class,Confidence (%),Source"];
+  history.forEach(h => lines.push([h.date, h.time, h.className, h.confidence, h.source].map(esc).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "papaya-classification-report.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+loadHistory();
+loadModel();
+</script>
+</body>
+</html>
