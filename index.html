@@ -53,7 +53,7 @@ th, td { border-bottom:1px solid var(--line); padding:5px 4px; text-align:left; 
 
   <h3>Captured / Uploaded Image</h3>
   <p class="note" style="margin:0 0 6px">Start Camera classifies the live video continuously. Capture &amp; Classify saves the current frame to the history. Or upload a photo:</p>
-  <input type="file" id="imageUpload" accept="image/*" capture="environment" onchange="classifyImage(event)">
+  <input type="file" id="imageUpload" accept="image/*" onchange="classifyImage(event)">
   <img id="preview" alt="Captured or uploaded papaya image">
 
   <h3>Classification Results</h3>
